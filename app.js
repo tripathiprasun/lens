@@ -10,9 +10,6 @@
   const HEX_PREVIEW_BYTES = 1024;
   const SIGNATURE_READ_BYTES = 64;
   const MAX_COLOR_SAMPLE = 128; // px, for the lightweight color survey
-  const MAX_STEGO_PIXELS = 4_000_000; // cap on pixels fed to steganalysis (~4MP); larger images are center-cropped
-  const STEGO_MIN_DIMENSION = 16; // below this, RS/chi-square are not meaningful
-  const IMAGE_FORMATS = ["jpeg", "png", "gif", "webp", "bmp"];
 
   const $ = (sel, ctx) => (ctx || document).querySelector(sel);
   const $$ = (sel, ctx) => Array.from((ctx || document).querySelectorAll(sel));
@@ -28,50 +25,6 @@
 
   let currentReportData = null;
   let currentPreviewUrl = null;
-  let stegoWorker = null;
-  let stegoRequestCounter = 0;
-  const pendingStegoRequests = new Map();
-
-  function getStegoWorker() {
-    if (stegoWorker) return stegoWorker;
-    try {
-      stegoWorker = new Worker("stego-worker.js");
-      stegoWorker.onmessage = (e) => {
-        const { requestId, ok, results, overall, error } = e.data;
-        const pending = pendingStegoRequests.get(requestId);
-        if (!pending) return;
-        pendingStegoRequests.delete(requestId);
-        if (ok) pending.resolve({ results, overall });
-        else pending.reject(new Error(error || "Steganalysis worker failed."));
-      };
-      stegoWorker.onerror = (e) => {
-        // A worker-level error (e.g. the script failed to load) fails every
-        // request currently in flight rather than hanging them silently.
-        for (const [, pending] of pendingStegoRequests) pending.reject(new Error("Steganalysis worker error."));
-        pendingStegoRequests.clear();
-        e.preventDefault && e.preventDefault();
-      };
-    } catch (e) {
-      stegoWorker = null;
-    }
-    return stegoWorker;
-  }
-
-  /**
-   * Run the heavy per-channel steganalysis math in the Web Worker so large
-   * images don't block the UI. Falls back to null (caller shows an error)
-   * if Web Workers aren't available in this context.
-   */
-  function runStegoAnalysis(width, height, channels) {
-    const worker = getStegoWorker();
-    if (!worker) return Promise.reject(new Error("Web Workers are not available in this browser context."));
-    const requestId = ++stegoRequestCounter;
-    const transferables = Object.values(channels).map((c) => c.buffer);
-    return new Promise((resolve, reject) => {
-      pendingStegoRequests.set(requestId, { resolve, reject });
-      worker.postMessage({ requestId, width, height, channels }, transferables);
-    });
-  }
 
   // -----------------------------------------------------------------
   // Entry points
@@ -148,38 +101,16 @@
         hashError = "Could not read the full file for hashing/entropy (it may be too large for this browser tab).";
       }
 
-      const isImage = signature && IMAGE_FORMATS.includes(signature.id);
+      const isImage = signature && ["jpeg", "png", "gif", "webp"].includes(signature.id);
       let imageInfo = null;
       let exif = null;
-      let stegoSupport = null;
-      let stegoResult = null;
-      let stegoError = null;
-
       if (isImage) {
-        stegoSupport = LensStego.getPixelAnalysisSupport(signature.id, headBytes);
         try {
-          imageInfo = await analyzeImage(file, stegoSupport.supported);
+          imageInfo = await analyzeImage(file);
         } catch (e) {
           imageInfo = { error: "Could not read image dimensions or color data." };
         }
-
-        if (stegoSupport.supported && imageInfo && imageInfo.stegoPixels) {
-          const px = imageInfo.stegoPixels;
-          if (px.tooSmall) {
-            stegoError = "Image is too small for a meaningful steganalysis pass.";
-          } else if (px.error) {
-            stegoError = px.error;
-          } else {
-            try {
-              const { results, overall } = await runStegoAnalysis(px.width, px.height, px.channels);
-              stegoResult = { perChannel: results, overall, cropped: px.cropped, fullWidth: px.fullWidth, fullHeight: px.fullHeight, analyzedWidth: px.width, analyzedHeight: px.height };
-            } catch (e) {
-              stegoError = "Steganalysis could not be completed for this image in this browser.";
-            }
-          }
-        }
       }
-
       if (signature && signature.id === "jpeg" && fullBytes) {
         try {
           exif = LensCore.parseJpegExif(fullBytes);
@@ -202,9 +133,6 @@
         isImage,
         imageInfo,
         exif,
-        stegoSupport,
-        stegoResult,
-        stegoError,
       });
     } catch (err) {
       console.error(err);
@@ -235,14 +163,7 @@
     return results;
   }
 
-  /**
-   * Decode the image once and derive everything pixel-based from that
-   * single decode: the small color-survey sample, and (only when
-   * `extractStegoPixels` is true) native-resolution channel arrays for
-   * steganalysis. Decoding twice for one file would double the work for
-   * no benefit, so both consumers share this one <img> load.
-   */
-  function analyzeImage(file, extractStegoPixels) {
+  function analyzeImage(file) {
     return new Promise((resolve, reject) => {
       const url = URL.createObjectURL(file);
       const img = new Image();
@@ -255,27 +176,22 @@
 
           const sampleW = Math.min(MAX_COLOR_SAMPLE, width) || 1;
           const sampleH = Math.min(MAX_COLOR_SAMPLE, height) || 1;
-          const sampleCanvas = document.createElement("canvas");
-          sampleCanvas.width = sampleW;
-          sampleCanvas.height = sampleH;
-          const sampleCtx = sampleCanvas.getContext("2d", { willReadFrequently: true });
-          sampleCtx.drawImage(img, 0, 0, sampleW, sampleH);
+          const canvas = document.createElement("canvas");
+          canvas.width = sampleW;
+          canvas.height = sampleH;
+          const ctx = canvas.getContext("2d", { willReadFrequently: true });
+          ctx.drawImage(img, 0, 0, sampleW, sampleH);
 
           let colorInfo = null;
           try {
-            const data = sampleCtx.getImageData(0, 0, sampleW, sampleH).data;
+            const data = ctx.getImageData(0, 0, sampleW, sampleH).data;
             colorInfo = surveyColors(data);
           } catch (e) {
             colorInfo = null; // canvas may be tainted for cross-origin sources; not expected here
           }
 
-          let stegoPixels = null;
-          if (extractStegoPixels && width > 0 && height > 0) {
-            stegoPixels = extractPixelChannels(img, width, height);
-          }
-
           URL.revokeObjectURL(url);
-          resolve({ width, height, aspect, colorInfo, stegoPixels });
+          resolve({ width, height, aspect, colorInfo });
         } catch (e) {
           URL.revokeObjectURL(url);
           reject(e);
@@ -287,76 +203,6 @@
       };
       img.src = url;
     });
-  }
-
-  /**
-   * Draw the already-decoded image at native resolution (no scaling, so
-   * pixel values — and their LSBs — are exactly as stored) and split its
-   * RGBA data into separate per-channel typed arrays. For very large
-   * images, reads only a centered crop capped at MAX_STEGO_PIXELS rather
-   * than the whole frame, since getImageData(x, y, w, h) on a sub-region
-   * only materializes that region.
-   */
-  function extractPixelChannels(img, width, height) {
-    if (width < STEGO_MIN_DIMENSION || height < STEGO_MIN_DIMENSION) {
-      return { tooSmall: true };
-    }
-
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    ctx.drawImage(img, 0, 0, width, height);
-
-    let cropX = 0,
-      cropY = 0,
-      cropW = width,
-      cropH = height,
-      cropped = false;
-
-    if (width * height > MAX_STEGO_PIXELS) {
-      const scale = Math.sqrt(MAX_STEGO_PIXELS / (width * height));
-      cropW = Math.max(STEGO_MIN_DIMENSION, Math.floor(width * scale));
-      cropH = Math.max(STEGO_MIN_DIMENSION, Math.floor(height * scale));
-      cropX = Math.floor((width - cropW) / 2);
-      cropY = Math.floor((height - cropH) / 2);
-      cropped = true;
-    }
-
-    let imageData;
-    try {
-      imageData = ctx.getImageData(cropX, cropY, cropW, cropH);
-    } catch (e) {
-      return { error: "Could not read raw pixel data from this image." };
-    }
-
-    const rgba = imageData.data;
-    const n = cropW * cropH;
-    const r = new Uint8Array(n);
-    const g = new Uint8Array(n);
-    const b = new Uint8Array(n);
-    let hasTransparency = false;
-    for (let i = 0; i < n; i++) {
-      const o = i * 4;
-      r[i] = rgba[o];
-      g[i] = rgba[o + 1];
-      b[i] = rgba[o + 2];
-      if (rgba[o + 3] < 255) hasTransparency = true;
-    }
-    let a = null;
-    if (hasTransparency) {
-      a = new Uint8Array(n);
-      for (let i = 0; i < n; i++) a[i] = rgba[i * 4 + 3];
-    }
-
-    return {
-      width: cropW,
-      height: cropH,
-      channels: a ? { r, g, b, a } : { r, g, b },
-      cropped,
-      fullWidth: width,
-      fullHeight: height,
-    };
   }
 
   function greatestCommonDivisor(a, b) {
@@ -412,22 +258,7 @@
 
   function render(data) {
     analysisView.setAttribute("aria-busy", "false");
-    const {
-      file,
-      extension,
-      signature,
-      extensionMatch,
-      hashes,
-      hashError,
-      entropy,
-      hexBytes,
-      isImage,
-      imageInfo,
-      exif,
-      stegoSupport,
-      stegoResult,
-      stegoError,
-    } = data;
+    const { file, extension, signature, extensionMatch, hashes, hashError, entropy, hexBytes, isImage, imageInfo, exif } = data;
 
     const lastModified = file.lastModified ? new Date(file.lastModified).toLocaleString() : "Unknown";
     const generatedAt = new Date().toISOString();
@@ -454,10 +285,6 @@
       metadata: exif ? buildMetadataForReport(exif) : null,
     });
 
-    if (isImage && currentReportData.image) {
-      currentReportData.image.steganalysis = buildStegoForReport(stegoSupport, stegoResult, stegoError);
-    }
-
     analysisView.innerHTML = "";
     analysisView.appendChild(buildHeaderSection(file, lastModified));
     analysisView.appendChild(buildSignatureSection(extension, file.type, signature, extensionMatch));
@@ -466,7 +293,6 @@
     analysisView.appendChild(buildEntropySection(entropy));
     if (isImage) analysisView.appendChild(buildImageSection(file, imageInfo));
     if (exif) analysisView.appendChild(buildMetadataSection(exif));
-    if (isImage) analysisView.appendChild(buildStegoSection(stegoSupport, stegoResult, stegoError));
     analysisView.appendChild(buildHexSection(hexBytes));
   }
 
@@ -706,289 +532,6 @@
     body.appendChild(sensitiveWrap);
 
     return section;
-  }
-
-  const STEGO_LIMITATIONS = [
-    "Natural, unmodified images can still produce unusual statistical results — these tests describe patterns, not intent.",
-    "Editing, resizing, or recompressing an image can change these statistics on its own.",
-    "Different steganography tools and algorithms leave different statistical traces; these tests target common LSB replacement specifically.",
-    "More sophisticated or format-aware steganography can evade all of the tests below.",
-    "A clean result does not prove the image contains no hidden data.",
-    "An elevated result does not prove steganography was used — it means the image's statistics resemble what LSB replacement tends to produce.",
-  ];
-
-  const VERDICT_LABEL = { none: "Normal", low: "Low indicator", moderate: "Moderate indicator", elevated: "Elevated indicator" };
-  const VERDICT_CLASS = { none: "status-ok", low: "status-ok", moderate: "status-warn", elevated: "status-warn" };
-  const CHANNEL_NAMES = { r: "Red channel", g: "Green channel", b: "Blue channel", a: "Alpha channel" };
-
-  function buildStegoForReport(stegoSupport, stegoResult, stegoError) {
-    if (!stegoSupport) return null;
-    if (!stegoSupport.supported) return { supported: false, reason: stegoSupport.reason };
-    if (stegoError) return { supported: true, completed: false, error: stegoError };
-    if (!stegoResult) return { supported: true, completed: false, error: "No result was produced." };
-
-    const channels = {};
-    for (const [name, r] of Object.entries(stegoResult.perChannel)) {
-      channels[name] = {
-        lsb: { percent_one: r.lsb.percentOne, deviation_from_balance: r.lsb.deviationFromBalance },
-        pixel_stats: { mean: r.stats.mean, variance: r.stats.variance, std_dev: r.stats.stdDev },
-        adjacent_correlation: r.correlation,
-        adjacent_lsb_agreement: r.lsbPairs ? r.lsbPairs.agreement : null,
-        chi_square: r.chi.reliable
-          ? { statistic: r.chi.statistic, degrees_of_freedom: r.chi.degreesOfFreedom, fit_score: r.chi.pValue }
-          : { reliable: false, note: r.chi.note },
-        rs_analysis: r.rs.reliable
-          ? {
-              regular_percent_mask: r.rs.regularPercentM,
-              singular_percent_mask: r.rs.singularPercentM,
-              regular_percent_neg_mask: r.rs.regularPercentNegM,
-              singular_percent_neg_mask: r.rs.singularPercentNegM,
-              asymmetry: r.rs.asymmetry,
-              estimated_tendency: r.rs.estimatedTendency,
-              note: r.rs.note,
-            }
-          : { reliable: false, note: r.rs.note },
-      };
-    }
-
-    return {
-      supported: true,
-      completed: true,
-      analyzed_region: { width: stegoResult.analyzedWidth, height: stegoResult.analyzedHeight },
-      full_image_size: { width: stegoResult.fullWidth, height: stegoResult.fullHeight },
-      region_was_cropped: stegoResult.cropped,
-      overall_assessment: stegoResult.overall.overall,
-      reasoning: stegoResult.overall.reasoning,
-      thresholds: stegoResult.overall.thresholds,
-      channels,
-      limitations: STEGO_LIMITATIONS,
-    };
-  }
-
-  function buildStegoSection(stegoSupport, stegoResult, stegoError) {
-    const section = sectionShell("Steganalysis");
-    const body = section.querySelector(".section__body");
-
-    if (!stegoSupport || !stegoSupport.supported) {
-      const reason = stegoSupport ? stegoSupport.reason : "This format is not supported.";
-      body.innerHTML = `
-        <div class="sig-status status-neutral">
-          <span class="sig-status__icon">–</span>
-          <span>Analysis status: not available for this format.</span>
-        </div>
-        <p class="muted-note">${escapeHtml(reason)}</p>
-      `;
-      return section;
-    }
-
-    if (stegoError) {
-      body.innerHTML = `
-        <div class="sig-status status-neutral">
-          <span class="sig-status__icon">–</span>
-          <span>Analysis status: could not complete.</span>
-        </div>
-        <p class="muted-note">${escapeHtml(stegoError)}</p>
-      `;
-      return section;
-    }
-
-    if (!stegoResult) {
-      body.innerHTML = `<p class="muted-note">Steganalysis did not produce a result for this image.</p>`;
-      return section;
-    }
-
-    const { overall, perChannel } = stegoResult;
-    const overallClass = VERDICT_CLASS[levelFromOverallLabel(overall.overall)] || "status-neutral";
-
-    const wrap = document.createElement("div");
-    wrap.className = "stego";
-
-    // Overall assessment
-    const overallEl = document.createElement("div");
-    overallEl.className = `sig-status ${overallClass}`;
-    overallEl.innerHTML = `
-      <span class="sig-status__icon">${overallIcon(overall.overall)}</span>
-      <span><strong>Overall: ${escapeHtml(overall.overall.toUpperCase())}</strong> — ${escapeHtml(overall.reasoning)}</span>
-    `;
-    wrap.appendChild(overallEl);
-
-    if (stegoResult.cropped) {
-      wrap.appendChild(
-        muted(
-          `Analyzed a centered ${stegoResult.analyzedWidth}×${stegoResult.analyzedHeight} region of the full ${stegoResult.fullWidth}×${stegoResult.fullHeight} image to keep analysis responsive.`
-        )
-      );
-    }
-
-    // Tests performed summary
-    const testRows = summarizeTests(perChannel);
-    const testsWrap = document.createElement("div");
-    testsWrap.className = "metadata-group";
-    testsWrap.innerHTML = `<h3 class="metadata-group__title">Tests performed</h3>`;
-    testsWrap.appendChild(buildDefinitionList(testRows));
-    wrap.appendChild(testsWrap);
-
-    // Per-channel breakdown
-    for (const [name, r] of Object.entries(perChannel)) {
-      wrap.appendChild(buildStegoChannelCard(name, r));
-    }
-
-    // Limitations
-    const limitsWrap = document.createElement("div");
-    limitsWrap.className = "metadata-group";
-    limitsWrap.innerHTML = `<h3 class="metadata-group__title">What this can't tell you</h3>`;
-    const ul = document.createElement("ul");
-    ul.className = "limits-list";
-    STEGO_LIMITATIONS.forEach((text) => {
-      const li = document.createElement("li");
-      li.textContent = text;
-      ul.appendChild(li);
-    });
-    limitsWrap.appendChild(ul);
-    wrap.appendChild(limitsWrap);
-
-    body.appendChild(wrap);
-    return section;
-  }
-
-  function levelFromOverallLabel(label) {
-    if (label === "Elevated indicators") return "elevated";
-    if (label === "Moderate indicators") return "moderate";
-    if (label === "Low indicators") return "low";
-    if (label === "No significant indicators") return "none";
-    return "neutral"; // Inconclusive
-  }
-
-  function overallIcon(label) {
-    const level = levelFromOverallLabel(label);
-    if (level === "elevated" || level === "moderate") return "⚠";
-    if (level === "none" || level === "low") return "✓";
-    return "?";
-  }
-
-  function summarizeTests(perChannel) {
-    const chiLevels = [];
-    const rsLevels = [];
-    const lsbDeviations = [];
-    for (const r of Object.values(perChannel)) {
-      chiLevels.push(chiVerdictFor(r.chi));
-      rsLevels.push(rsVerdictFor(r.rs));
-      lsbDeviations.push(r.lsb.deviationFromBalance);
-    }
-    const worstOf = (levels) => {
-      const rank = { none: 0, low: 1, moderate: 2, elevated: 3, unreliable: -1 };
-      let best = "unreliable";
-      for (const l of levels) if (rank[l] > rank[best]) best = l;
-      return best;
-    };
-    const maxLsbDeviation = Math.max(...lsbDeviations);
-    return [
-      ["LSB distribution", `Largest deviation from 50/50 balance: ${maxLsbDeviation.toFixed(2)} percentage points`],
-      ["Chi-square", labelForWorst(worstOf(chiLevels))],
-      ["RS analysis", labelForWorst(worstOf(rsLevels))],
-    ];
-  }
-
-  function chiVerdictFor(chi) {
-    if (!chi || !chi.reliable || chi.pValue == null) return "unreliable";
-    const p = chi.pValue;
-    if (p >= 0.999) return "elevated";
-    if (p >= 0.95) return "moderate";
-    if (p >= 0.8) return "low";
-    return "none";
-  }
-
-  function rsVerdictFor(rs) {
-    if (!rs || !rs.reliable || rs.asymmetry == null) return "unreliable";
-    const a = rs.asymmetry;
-    if (a >= 15) return "elevated";
-    if (a >= 7) return "moderate";
-    if (a >= 3) return "low";
-    return "none";
-  }
-
-  function labelForWorst(level) {
-    if (level === "unreliable") return "Analysis inconclusive";
-    return VERDICT_LABEL[level] || "Analysis inconclusive";
-  }
-
-  function buildStegoChannelCard(name, r) {
-    const card = document.createElement("div");
-    card.className = "metadata-group stego-channel";
-    const title = document.createElement("h3");
-    title.className = "metadata-group__title";
-    title.textContent = CHANNEL_NAMES[name] || name;
-    card.appendChild(title);
-
-    // LSB balance bar (reuses the entropy bar visual language)
-    const barWrap = document.createElement("div");
-    barWrap.className = "entropy-value mono";
-    barWrap.style.marginBottom = "4px";
-    barWrap.textContent = `LSBs: ${r.lsb.percentOne.toFixed(2)}% set to 1 (${r.lsb.deviationFromBalance.toFixed(2)} pts from balanced)`;
-    card.appendChild(barWrap);
-    const bar = document.createElement("div");
-    bar.className = "entropy-bar";
-    const fill = document.createElement("div");
-    fill.className = "entropy-bar__fill";
-    fill.style.width = `${Math.min(100, r.lsb.percentOne).toFixed(1)}%`;
-    bar.appendChild(fill);
-    card.appendChild(bar);
-
-    const rows = [
-      [
-        "Chi-square (pairs-of-values)",
-        r.chi.reliable
-          ? `fit score ${r.chi.pValue.toFixed(4)} (df=${r.chi.degreesOfFreedom}) — ${labelForWorst(chiVerdictFor(r.chi))}`
-          : `Not reliable — ${r.chi.note}`,
-      ],
-      [
-        "RS analysis",
-        r.rs.reliable
-          ? `asymmetry ${r.rs.asymmetry.toFixed(2)} pts, estimated tendency ${
-              r.rs.estimatedTendency != null ? (r.rs.estimatedTendency * 100).toFixed(1) + "%" : "n/a"
-            } — ${labelForWorst(rsVerdictFor(r.rs))}`
-          : `Not reliable — ${r.rs.note}`,
-      ],
-      ["Mean / std. deviation", `${r.stats.mean.toFixed(2)} / ${r.stats.stdDev.toFixed(2)}`],
-      ["Adjacent-pixel correlation", r.correlation != null ? r.correlation.toFixed(3) : "n/a"],
-      ["Adjacent LSB agreement", r.lsbPairs ? r.lsbPairs.agreement.toFixed(3) : "n/a"],
-    ];
-    card.appendChild(buildDefinitionList(rows));
-
-    const sparkline = buildHistogramSparkline(r.histogram);
-    if (sparkline) card.appendChild(sparkline);
-
-    return card;
-  }
-
-  /** Lightweight 32-bin histogram sparkline as inline SVG, single accent color. */
-  function buildHistogramSparkline(histogram256) {
-    if (!histogram256 || !histogram256.length) return null;
-    const bins = 32;
-    const binSize = 256 / bins;
-    const binned = new Array(bins).fill(0);
-    for (let i = 0; i < 256; i++) binned[Math.floor(i / binSize)] += histogram256[i];
-    const max = Math.max(...binned, 1);
-
-    const w = 320,
-      h = 48,
-      pad = 2;
-    const points = binned
-      .map((v, i) => {
-        const x = pad + (i / (bins - 1)) * (w - pad * 2);
-        const y = h - pad - (v / max) * (h - pad * 2);
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      })
-      .join(" ");
-
-    const wrap = document.createElement("div");
-    wrap.className = "stego-histogram";
-    wrap.innerHTML = `
-      <svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" preserveAspectRatio="none" role="img" aria-label="Byte value histogram">
-        <polyline points="${points}" fill="none" stroke="var(--accent)" stroke-width="1.5" />
-      </svg>
-    `;
-    return wrap;
   }
 
   function buildHexSection(hexBytes) {
