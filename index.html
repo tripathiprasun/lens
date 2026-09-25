@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LENS — local file &amp; image forensics</title>
+<meta name="description" content="LENS inspects files entirely in your browser: signatures, hashes, entropy, EXIF, and a hex view. Nothing is uploaded." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='13' cy='13' r='9' fill='none' stroke='%23C99A4B' stroke-width='3'/%3E%3Cline x1='20' y1='20' x2='28' y2='28' stroke='%23C99A4B' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <div class="brand">
+      <svg class="brand__mark" width="22" height="22" viewBox="0 0 32 32" aria-hidden="true">
+        <circle cx="13" cy="13" r="9" fill="none" stroke="currentColor" stroke-width="3"/>
+        <line x1="20" y1="20" x2="28" y2="28" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+      </svg>
+      <span class="brand__name">LENS</span>
+    </div>
+    <p class="topbar__tagline">local file &amp; image forensics</p>
+  </div>
+</header>
+
+<main class="main">
+  <div id="error-banner" class="error-banner" role="alert" hidden></div>
+
+  <section id="empty-state" class="empty-state">
+    <p class="empty-state__lede">
+      Drop a file to inspect its signature, hashes, entropy, and metadata —
+      entirely on this device.
+    </p>
+
+    <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Drop a file here or press Enter to choose one">
+      <svg class="dropzone__icon" width="40" height="40" viewBox="0 0 32 32" aria-hidden="true">
+        <circle cx="13" cy="13" r="9" fill="none" stroke="currentColor" stroke-width="2.5"/>
+        <line x1="20" y1="20" x2="28" y2="28" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+      </svg>
+      <p class="dropzone__text">Drag a file here</p>
+      <button type="button" id="choose-file-btn" class="btn btn--primary">Choose file</button>
+      <input type="file" id="file-input" hidden />
+    </div>
+
+    <div class="supported-info">
+      <p class="supported-info__title">Recognized signatures</p>
+      <p class="supported-info__list mono">JPEG · PNG · GIF · WebP · PDF · ZIP · RAR · 7z · GZIP · MP3 · MP4 · WebM · WAV · EXE/PE · ELF</p>
+      <p class="supported-info__note">Other files are still hashed, entropy-scored, and hex-dumped — LENS just won't be able to name the format.</p>
+    </div>
+
+    <p class="privacy-note">Files are processed locally in your browser and are not uploaded.</p>
+  </section>
+
+  <section id="analysis-view" class="analysis-view" hidden aria-live="polite">
+    <!-- populated by app.js -->
+  </section>
+
+  <div id="action-bar" class="action-bar">
+    <button type="button" id="new-file-btn" class="btn btn--ghost" hidden>Analyze another file</button>
+    <button type="button" id="export-report-btn" class="btn btn--secondary" hidden>Export report</button>
+  </div>
+</main>
+
+<footer class="footer">
+  <p>LENS is a local inspection tool, not a malware scanner or a complete forensic suite. Nothing you open here ever leaves this browser tab.</p>
+</footer>
+
+<script src="lens-core.js"></script>
+<script src="app.js"></script>
+<script>
+  // Wire the action-bar buttons to visibility, and reveal them once a file loads.
+  (function () {
+    const analysisView = document.getElementById("analysis-view");
+    const newFileBtn = document.getElementById("new-file-btn");
+    const exportBtn = document.getElementById("export-report-btn");
+    const observer = new MutationObserver(() => {
+      const hasContent = !analysisView.hidden;
+      newFileBtn.hidden = !hasContent;
+      exportBtn.hidden = !hasContent;
+    });
+    observer.observe(analysisView, { attributes: true, attributeFilter: ["hidden"] });
+  })();
+</script>
+</body>
+</html>
