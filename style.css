@@ -509,6 +509,53 @@ a {
   line-height: 1.3;
 }
 
+/* Steganalysis */
+
+.steg-channel {
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+.steg-canvas-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+}
+
+.steg-canvas-figure {
+  margin: 0;
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.steg-canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  background: var(--panel-raised);
+  border-radius: 2px;
+}
+
+.steg-canvas-figure figcaption {
+  margin-top: 8px;
+}
+
+.steg-disclaimer {
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-top: 18px;
+}
+
+.steg-disclaimer .muted-note {
+  max-width: none;
+}
+
 /* Hex viewer */
 
 .hex-dump {
@@ -549,5 +596,8 @@ a {
   }
   .hash-row {
     grid-template-columns: 1fr;
+  }
+  .steg-canvas-row {
+    flex-direction: column;
   }
 }

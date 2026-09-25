@@ -66,6 +66,12 @@
       match: (b) => asciiAt(b, 0, 4) === "RIFF" && asciiAt(b, 8, 4) === "WEBP",
     },
     {
+      id: "bmp",
+      label: "BMP",
+      extensions: ["bmp", "dib"],
+      match: (b) => bytesEqual(b, 0, [0x42, 0x4d]),
+    },
+    {
       id: "wav",
       label: "WAV",
       extensions: ["wav"],
@@ -502,6 +508,7 @@
       entropy: fields.entropy != null ? Number(fields.entropy.toFixed(4)) : null,
       image: fields.image || null,
       metadata: fields.metadata || null,
+      steganalysis: fields.steganalysis || null,
     };
   }
 
