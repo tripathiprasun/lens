@@ -68,7 +68,7 @@ Or just open `index.html` directly in a browser — everything works from the lo
 2. In the repository, go to **Settings → Pages**.
 3. Under **Build and deployment**, set **Source** to "Deploy from a branch."
 4. Choose your default branch and the folder containing `index.html` (`/root` if these files are at the repo root, or `/docs` if you've placed them in a `docs/` folder).
-5. Save. GitHub will publish the site at `https://<username>.github.io/<repo>/` within a minute or two.
+5. Save. GitHub will publish the site at `https://tripathiprasun.github.io/lens/` within a minute or two.
 
 No environment variables, secrets, or build pipeline are needed — it's a static site.
 
